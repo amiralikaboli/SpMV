@@ -26,7 +26,7 @@ float coo_vals[MAX_DIM * MAX_DIM], coo_vecs[MAX_DIM * MAX_DIM];
 int csr_offsets[MAX_DIM], csr_cols[MAX_DIM * MAX_DIM];
 float csr_vals[MAX_DIM * MAX_DIM], csr_vecs[MAX_DIM * MAX_DIM];
 int ell_cols[MAX_DIM * MAX_DIM], max_el = -INF;
-float ell_vals[MAX_DIM * MAX_DIM];
+float ell_vals[MAX_DIM * MAX_DIM], ell_vecs[MAX_DIM * MAX_DIM];
 int dia_diags[MAX_DIM], n_diag = 0;
 float dia_vals[2 * MAX_DIM * MAX_DIM];
 
@@ -171,7 +171,7 @@ void CSR_multiplication(bool use_simd, int start_row = 0, int end_row = dim){
     }
 }
 
-void generate_ELL_format(bool vec_opt){
+void generate_ELL_format(bool vec_opt, bool use_simd = false){
     max_el = -INF;
     for (int i = 0; i < dim; ++i){
         int cnt = 0;
@@ -182,10 +182,12 @@ void generate_ELL_format(bool vec_opt){
 
         max_el = max(max_el, cnt);
     }
+    if (use_simd)
+        max_el = ((max_el / 8) + 1) * 8;
 
     for (int i = 0; i < max_el * dim; ++i){
-        ell_cols[i] = -1;
-        ell_vals[i] = -1;
+        ell_cols[i] = MAX_DIM - 1;
+        ell_vals[i] = 0;
     }
 
     for (int i = 0; i < dim; ++i){
@@ -195,18 +197,36 @@ void generate_ELL_format(bool vec_opt){
                 if (!vec_opt || vec[j]){
                     ell_cols[i * max_el + cnt] = j;
                     ell_vals[i * max_el + cnt] = mat[i][j];
+                    ell_vecs[i * max_el + cnt] = vec[j];
                     ++cnt;
                 }
     }
 }
-void ELL_multiplication(){
-    for (int r = 0; r < dim; ++r)
-        for (int i = 0; i < max_el; ++i){
-            int ind = r * max_el + i;
-            int col = ell_cols[ind];
-            if (col != -1)
-                ans[r] += ell_vals[ind] * vec[col];
+void ELL_multiplication(bool use_simd){
+    if (use_simd){
+        for (int r = 0; r < dim; ++r){
+            __m256* mcoo_vals = (__m256*) (ell_vals + (r * max_el));
+            __m256* mcoo_vecs = (__m256*) (ell_vecs + (r * max_el));
+            __m256 ymm, ymm2;
+
+            int steps = (max_el >> 3);
+            for (int i = 0; i < steps; ++i){
+                ymm = _mm256_mul_ps(mcoo_vals[i], mcoo_vecs[i]);
+                ymm2 = _mm256_permute2f128_ps(ymm , ymm , 1);
+                ymm = _mm256_add_ps(ymm, ymm2);
+                ymm = _mm256_hadd_ps(ymm, ymm);
+                ymm = _mm256_hadd_ps(ymm, ymm);
+
+                ans[r] += ymm[0];
+            }
         }
+    }
+    else{
+        int linear_limit = dim * max_el;
+        for (int i = 0; i < linear_limit; ++i)
+            if (ell_cols[i] != MAX_DIM - 1)
+                ans[i / max_el] += ell_vals[i] * vec[ell_cols[i]];
+    }
 }
 
 void generate_DIA_format(bool vec_opt){
