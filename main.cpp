@@ -2,6 +2,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <thread>
+#include <immintrin.h>
 
 using namespace std;
 
@@ -10,43 +11,47 @@ const int MAX_DIM = 5000 + 10;
 const int MAX_THREADS = 10;
 
 int sample_size = 100;
-int dim = 5000;
-float sparsity = 0.8;
+int dim = 2000;
+float sparsity = 0.5;
 int sparsity_steps = 10;
 int num_thread = 4;
 thread threads[10];
 
 int nnz = INF;
-int vec[MAX_DIM];
-int mat[MAX_DIM][MAX_DIM];
-int ans[MAX_DIM];
-int coo_rows[MAX_DIM * MAX_DIM], coo_cols[MAX_DIM * MAX_DIM], coo_vals[MAX_DIM * MAX_DIM];
-int csr_offsets[MAX_DIM], csr_cols[MAX_DIM * MAX_DIM], csr_vals[MAX_DIM * MAX_DIM];
-int ell_cols[MAX_DIM * MAX_DIM], ell_vals[MAX_DIM * MAX_DIM], max_el = -INF;
-int dia_diags[MAX_DIM], dia_vals[2 * MAX_DIM * MAX_DIM], n_diag = 0;
+float vec[MAX_DIM];
+float mat[MAX_DIM][MAX_DIM];
+float ans[MAX_DIM];
+int coo_rows[MAX_DIM * MAX_DIM], coo_cols[MAX_DIM * MAX_DIM];
+float coo_vals[MAX_DIM * MAX_DIM], coo_vecs[MAX_DIM * MAX_DIM];
+int csr_offsets[MAX_DIM], csr_cols[MAX_DIM * MAX_DIM];
+float csr_vals[MAX_DIM * MAX_DIM], csr_vecs[MAX_DIM * MAX_DIM];
+int ell_cols[MAX_DIM * MAX_DIM], max_el = -INF;
+float ell_vals[MAX_DIM * MAX_DIM];
+int dia_diags[MAX_DIM], n_diag = 0;
+float dia_vals[2 * MAX_DIM * MAX_DIM];
 
 
-float frand(){
+float rand01(){
     return (float) rand() / RAND_MAX;
 }
-int dgrand(){
-    return rand() % 9 + 1;
+float float_rand(){
+    return (rand() % 100 + 1) / 10.0;
 }
 
 void fill_arrays(){
     for (int i = 0; i < dim; ++i){
-        if (frand() < sparsity)
+        if (rand01() < sparsity)
             vec[i] = 0;
         else
-            vec[i] = dgrand();
+            vec[i] = float_rand();
     }
 
     for (int i = 0; i < dim; ++i){
         for (int j = 0; j < dim; ++j){
-            if (frand() < sparsity)
+            if (rand01() < sparsity)
                 mat[i][j] = 0;
             else
-                mat[i][j] = dgrand();
+                mat[i][j] = float_rand();
         }
     }
 
@@ -60,24 +65,61 @@ void full_multiplication(){
             ans[r] += mat[r][i] * vec[i];
 }
 
-void generate_COO_format(bool vec_opt){
+float* simd_mul(float* vec1, float* vec2){
+    __m256 mvec1 = _mm256_loadu_ps(vec1);
+    __m256 mvec2 = _mm256_loadu_ps(vec2);
+    __m256 mmul_ans = _mm256_mul_ps(mvec1, mvec2);
+    float* mul_ans = (float *) &mmul_ans;
+    return mul_ans;
+}
+
+void generate_COO_format(bool vec_opt, bool use_simd = false){
     nnz = 0;
-    for (int i = 0; i < dim; ++i)
+    for (int i = 0; i < dim; ++i){
         for (int j = 0; j < dim; ++j)
             if (mat[i][j])
                 if (!vec_opt || vec[j]){
                     coo_rows[nnz] = i;
                     coo_cols[nnz] = j;
                     coo_vals[nnz] = mat[i][j];
+                    coo_vecs[nnz] = vec[j];
                     ++nnz;
                 }
+
+        if (use_simd)
+            while(nnz % 8 != 0){
+                coo_rows[nnz] = MAX_DIM - 1;
+                coo_cols[nnz] = MAX_DIM - 1;
+                coo_vals[nnz] = 0;
+                coo_vecs[nnz] = 0;
+                ++nnz;
+            }
+    }
 }
-void COO_multiplication(){
-    for (int i = 0; i < nnz; ++i)
-        ans[coo_rows[i]] += coo_vals[i] * vec[coo_cols[i]];
+void COO_multiplication(bool use_simd){
+    if (use_simd){
+        __m256* mcoo_vals = (__m256*) coo_vals;
+        __m256* mcoo_vecs = (__m256*) coo_vecs;
+        __m256 ymm, ymm2;
+
+        int steps = nnz / 8;
+        for (int i = 0; i < steps; ++i){
+            ymm = _mm256_mul_ps(mcoo_vals[i], mcoo_vecs[i]);
+            ymm2 = _mm256_permute2f128_ps(ymm , ymm , 1);
+            ymm = _mm256_add_ps(ymm, ymm2);
+            ymm = _mm256_hadd_ps(ymm, ymm);
+            ymm = _mm256_hadd_ps(ymm, ymm);
+
+            ans[coo_rows[(i << 3)]] += ymm[0];
+        }
+    }
+    else{
+        for (int i = 0; i < nnz; ++i)
+            ans[coo_rows[i]] += coo_vals[i] * vec[coo_cols[i]];
+    }
 }
 
-void generate_CSR_format(bool vec_opt){
+void generate_CSR_format(bool vec_opt, bool use_simd = false){
     nnz = 0;
 
     csr_offsets[0] = 0;
@@ -87,18 +129,47 @@ void generate_CSR_format(bool vec_opt){
                 if (!vec_opt || vec[j]){
                     csr_cols[nnz] = j;
                     csr_vals[nnz] = mat[i][j];
+                    csr_vecs[nnz] = vec[j];
                     ++nnz;
                 }
+
+        if (use_simd)
+            while (nnz % 8 != 0) {
+                csr_cols[nnz] = MAX_DIM - 1;
+                csr_vals[nnz] = 0;
+                csr_vecs[nnz] = 0;
+                ++nnz;
+            }
 
         csr_offsets[i + 1] = nnz;
     }
 }
-void CSR_multiplication(int start_row = 0, int end_row = dim){
-    for (int r = start_row; r < end_row; ++r)
-        for (int i = csr_offsets[r]; i < csr_offsets[r + 1]; ++i)
-            ans[r] += csr_vals[i] * vec[csr_cols[i]];
-}
+void CSR_multiplication(bool use_simd, int start_row = 0, int end_row = dim){
+    if (use_simd){
+        for (int r = start_row; r < end_row; ++r){
+            __m256* mcoo_vals = (__m256*) (csr_vals + csr_offsets[r]);
+            __m256* mcoo_vecs = (__m256*) (csr_vecs + csr_offsets[r]);
+            __m256 ymm, ymm2;
 
+            int steps = ((csr_offsets[r + 1] - csr_offsets[r]) >> 3);
+            for (int i = 0; i < steps; ++i){
+                ymm = _mm256_mul_ps(mcoo_vals[i], mcoo_vecs[i]);
+                ymm2 = _mm256_permute2f128_ps(ymm , ymm , 1);
+                ymm = _mm256_add_ps(ymm, ymm2);
+                ymm = _mm256_hadd_ps(ymm, ymm);
+                ymm = _mm256_hadd_ps(ymm, ymm);
+
+                ans[r] += ymm[0];
+            }
+        }
+    }
+    else{
+        // #pragma omp parallel for
+        for (int r = start_row; r < end_row; ++r)
+            for (int i = csr_offsets[r]; i < csr_offsets[r + 1]; ++i)
+                ans[r] += csr_vals[i] * vec[csr_cols[i]];
+    }
+}
 
 void generate_ELL_format(bool vec_opt){
     max_el = -INF;
@@ -178,31 +249,31 @@ void DIA_multiplication(){
         }
 }
 
-void general_format_generator(string spmv_format, bool vec_opt){
+void general_format_generator(string spmv_format, bool vec_opt, bool use_simd){
     if (spmv_format == "COO")
-        generate_COO_format(vec_opt);
+        generate_COO_format(vec_opt, use_simd);
     else if (spmv_format == "CSR" || spmv_format == "MCSR")
-        generate_CSR_format(vec_opt);
+        generate_CSR_format(vec_opt, use_simd);
     else if (spmv_format == "ELL")
         generate_ELL_format(vec_opt);
     else if (spmv_format == "DIA")
         generate_DIA_format(vec_opt);
 }
-void general_multiplication(string spmv_format){
+void general_multiplication(string spmv_format, bool use_simd){
     if (spmv_format == "COO")
-        COO_multiplication();
+        COO_multiplication(use_simd);
     else if (spmv_format == "CSR")
-        CSR_multiplication();
+        CSR_multiplication(use_simd);
     else if (spmv_format == "MCSR"){
         for (int i = 0; i < num_thread; ++i)
-            threads[i] = thread(CSR_multiplication, i * dim / num_thread, (i + 1) * dim / num_thread);
+            threads[i] = thread(CSR_multiplication, use_simd, i * dim / num_thread, (i + 1) * dim / num_thread);
         for (int i = 0; i < num_thread; ++i)
             threads[i].join();
     }
     else if (spmv_format == "ELL")
-        ELL_multiplication();
+        ELL_multiplication(use_simd);
     else if (spmv_format == "DIA")
-        DIA_multiplication();
+        DIA_multiplication(use_simd);
     else
         full_multiplication();
 }
@@ -218,6 +289,10 @@ int main() {
     cin >> yn;
     bool vec_opt = (yn == "y");
 
+    cout << "Do you want SIMD to be used?[y/n] ";
+    cin >> yn;
+    bool use_simd = (yn == "y");
+
     srand(time(0));
 
     for (int s = 0; s < sparsity_steps; ++s){
@@ -226,10 +301,10 @@ int main() {
         int sum_time = 0;
         for (int i = 0; i < sample_size; ++i) {
             fill_arrays();
-            general_format_generator(spmv_format, vec_opt);
+            general_format_generator(spmv_format, vec_opt, use_simd);
 
             clock_t begin_time = clock();
-            general_multiplication(spmv_format);
+            general_multiplication(spmv_format, use_simd);
             clock_t end_time = clock();
 
             sum_time += end_time - begin_time;
