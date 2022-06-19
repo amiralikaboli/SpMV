@@ -65,14 +65,6 @@ void full_multiplication(){
             ans[r] += mat[r][i] * vec[i];
 }
 
-float* simd_mul(float* vec1, float* vec2){
-    __m256 mvec1 = _mm256_loadu_ps(vec1);
-    __m256 mvec2 = _mm256_loadu_ps(vec2);
-    __m256 mmul_ans = _mm256_mul_ps(mvec1, mvec2);
-    float* mul_ans = (float *) &mmul_ans;
-    return mul_ans;
-}
-
 void generate_COO_format(bool vec_opt, bool use_simd = false){
     nnz = 0;
     for (int i = 0; i < dim; ++i){
