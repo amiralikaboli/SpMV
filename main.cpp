@@ -65,7 +65,7 @@ void full_multiplication(){
             ans[r] += mat[r][i] * vec[i];
 }
 
-void generate_COO_format(bool vec_opt, bool use_simd = false){
+void generate_COO_format(bool vec_opt, bool use_simd){
     nnz = 0;
     for (int i = 0; i < dim; ++i){
         for (int j = 0; j < dim; ++j)
@@ -111,7 +111,7 @@ void COO_multiplication(bool use_simd){
     }
 }
 
-void generate_CSR_format(bool vec_opt, bool use_simd = false){
+void generate_CSR_format(bool vec_opt, bool use_simd){
     nnz = 0;
 
     csr_offsets[0] = 0;
@@ -136,9 +136,9 @@ void generate_CSR_format(bool vec_opt, bool use_simd = false){
         csr_offsets[i + 1] = nnz;
     }
 }
-void CSR_multiplication(bool use_simd, int start_row = 0, int end_row = dim){
+void CSR_multiplication(bool use_simd, int l_row = 0, int r_row = dim){
     if (use_simd){
-        for (int r = start_row; r < end_row; ++r){
+        for (int r = l_row; r < r_row; ++r){
             __m256* mcoo_vals = (__m256*) (csr_vals + csr_offsets[r]);
             __m256* mcoo_vecs = (__m256*) (csr_vecs + csr_offsets[r]);
             __m256 ymm, ymm2;
@@ -157,13 +157,13 @@ void CSR_multiplication(bool use_simd, int start_row = 0, int end_row = dim){
     }
     else{
         // #pragma omp parallel for
-        for (int r = start_row; r < end_row; ++r)
+        for (int r = l_row; r < r_row; ++r)
             for (int i = csr_offsets[r]; i < csr_offsets[r + 1]; ++i)
                 ans[r] += csr_vals[i] * vec[csr_cols[i]];
     }
 }
 
-void generate_ELL_format(bool vec_opt, bool use_simd = false){
+void generate_ELL_format(bool vec_opt, bool use_simd){
     max_el = -INF;
     for (int i = 0; i < dim; ++i){
         int cnt = 0;
@@ -194,9 +194,9 @@ void generate_ELL_format(bool vec_opt, bool use_simd = false){
                 }
     }
 }
-void ELL_multiplication(bool use_simd){
+void ELL_multiplication(bool use_simd, int l_row = 0, int r_row = dim){
     if (use_simd){
-        for (int r = 0; r < dim; ++r){
+        for (int r = l_row; r < r_row; ++r){
             __m256* mcoo_vals = (__m256*) (ell_vals + (r * max_el));
             __m256* mcoo_vecs = (__m256*) (ell_vecs + (r * max_el));
             __m256 ymm, ymm2;
@@ -214,8 +214,9 @@ void ELL_multiplication(bool use_simd){
         }
     }
     else{
-        int linear_limit = dim * max_el;
-        for (int i = 0; i < linear_limit; ++i)
+        int l_limit = l_row * max_el;
+        int r_limit = r_row * max_el;
+        for (int i = l_limit; i < r_limit; ++i)
             if (ell_cols[i] != MAX_DIM - 1)
                 ans[i / max_el] += ell_vals[i] * vec[ell_cols[i]];
     }
@@ -242,9 +243,9 @@ void generate_DIA_format(bool vec_opt){
         int d = dia_diags[j];
 
         for (int i = 0; i < -d; ++i)
-            dia_vals[i * n_diag + j] = -1;
+            dia_vals[i * n_diag + j] = 0;
         for (int i = 0; i < d; ++i)
-            dia_vals[(dim - i - 1) * n_diag + j] = -1;
+            dia_vals[(dim - i - 1) * n_diag + j] = 0;
 
         for (int i = max(0, -d); i < min(dim, dim - d); ++i)
             dia_vals[i * n_diag + j] = mat[i][i + d];
@@ -256,7 +257,7 @@ void DIA_multiplication(){
             int col = i + dia_diags[d];
             int ind = i * n_diag + d;
 
-            if (dia_vals[ind] != -1)
+            if (dia_vals[ind] != 0)
                 ans[i] += dia_vals[ind] * vec[col];
         }
 }
@@ -264,30 +265,46 @@ void DIA_multiplication(){
 void general_format_generator(string spmv_format, bool vec_opt, bool use_simd){
     if (spmv_format == "COO")
         generate_COO_format(vec_opt, use_simd);
-    else if (spmv_format == "CSR" || spmv_format == "MCSR")
+    else if (spmv_format == "CSR")
         generate_CSR_format(vec_opt, use_simd);
     else if (spmv_format == "ELL")
-        generate_ELL_format(vec_opt);
+        generate_ELL_format(vec_opt, use_simd);
     else if (spmv_format == "DIA")
         generate_DIA_format(vec_opt);
 }
-void general_multiplication(string spmv_format, bool use_simd){
+void general_multiplication(string spmv_format, bool use_simd, int l_row = 0, int r_row = dim){
     if (spmv_format == "COO")
         COO_multiplication(use_simd);
     else if (spmv_format == "CSR")
-        CSR_multiplication(use_simd);
-    else if (spmv_format == "MCSR"){
+        CSR_multiplication(use_simd, l_row, r_row);
+    else if (spmv_format == "ELL")
+        ELL_multiplication(use_simd, l_row, r_row);
+    else if (spmv_format == "DIA")
+        DIA_multiplication();
+    else
+        full_multiplication();
+}
+
+void general_parallism_controller(bool run_parallel, bool spmv_format bool use_simd){
+    if (!run_parallel){
+        general_multiplication(spmv_format, use_simd);
+        return;
+    }
+
+    if (spmv_format == "CSR" || spmv_format == "ELL"){
         for (int i = 0; i < num_thread; ++i)
-            threads[i] = thread(CSR_multiplication, use_simd, i * dim / num_thread, (i + 1) * dim / num_thread);
+            threads[i] = thread(
+                general_multiplication,
+                spmv_format,
+                use_simd,
+                i * dim / num_thread,
+                (i + 1) * dim / num_thread
+            );
         for (int i = 0; i < num_thread; ++i)
             threads[i].join();
     }
-    else if (spmv_format == "ELL")
-        ELL_multiplication(use_simd);
-    else if (spmv_format == "DIA")
-        DIA_multiplication(use_simd);
     else
-        full_multiplication();
+        general_multiplication(spmv_format, use_simd);
 }
 
 
@@ -305,6 +322,10 @@ int main() {
     cin >> yn;
     bool use_simd = (yn == "y");
 
+    cout << "Do you want to run in parallel?[y/n] ";
+    cin >> yn;
+    bool run_parallel = (yn == "y");
+
     srand(time(0));
 
     for (int s = 0; s < sparsity_steps; ++s){
@@ -316,7 +337,8 @@ int main() {
             general_format_generator(spmv_format, vec_opt, use_simd);
 
             clock_t begin_time = clock();
-            general_multiplication(spmv_format, use_simd);
+            general_parallism_controller(run_parallel, spmv_format, use_simd)
+            // general_multiplication(spmv_format, use_simd);
             clock_t end_time = clock();
 
             sum_time += end_time - begin_time;
