@@ -313,7 +313,7 @@ int main() {
     string spmv_format;
     cin >> spmv_format;
 
-    cout << "Do you want the vector elements to be used in pre-processing?[y/n] ";
+    cout << "Do you want the vector sparsity to be used?[y/n] ";
     string yn;
     cin >> yn;
     bool vec_opt = (yn == "y");
