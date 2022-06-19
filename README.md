@@ -1,11 +1,11 @@
 # SpMV
-Sparse Matrix &amp; Vector Multiplication
+##Sparse Matrix &amp; Vector Multiplication
 
 ![plot](./plots/SpMV_Methods.png)
 
 ## How to run
 
-`g++ -std=c++11 -mavx new_spmspv.cpp`
+`g++ -std=c++11 -mavx ./main.cpp`
 
 SpMV method: choose one of `FULL`, `COO`, `CSR`, `ELL`, or `DIA` options.
 
