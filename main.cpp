@@ -285,7 +285,7 @@ void general_multiplication(string spmv_format, bool use_simd, int l_row = 0, in
         full_multiplication();
 }
 
-void general_parallism_controller(bool run_parallel, bool spmv_format bool use_simd){
+void general_parallism_controller(bool run_parallel, string spmv_format, bool use_simd){
     if (!run_parallel){
         general_multiplication(spmv_format, use_simd);
         return;
@@ -337,15 +337,14 @@ int main() {
             general_format_generator(spmv_format, vec_opt, use_simd);
 
             clock_t begin_time = clock();
-            general_parallism_controller(run_parallel, spmv_format, use_simd)
-            // general_multiplication(spmv_format, use_simd);
+            general_parallism_controller(run_parallel, spmv_format, use_simd);
             clock_t end_time = clock();
 
             sum_time += end_time - begin_time;
         }
 
-        // cout << sparsity << " " << double(sum_time) / sample_size << " clocks" << endl;
-        cout << double(sum_time) / sample_size << endl;
+        cout << sparsity << ": " << double(sum_time) / sample_size / (CLOCKS_PER_SEC / 1000) << " ms" << endl;
+        // cout << double(sum_time) / sample_size / (CLOCKS_PER_SEC / 1000) << endl;
     }
 
     return 0;
